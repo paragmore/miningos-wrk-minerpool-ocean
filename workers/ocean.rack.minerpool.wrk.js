@@ -110,7 +110,7 @@ class WrkMinerPoolRackOcean extends TetherWrkBase {
           await this.fetchHashrateHistory()
           break
         case SCHEDULER_TIMES._1D.key:
-          await this.fetchTransactions()
+          await this.fetchTransactions(time)
           await this.fetchBlocks()
           await this.fetchYearlyBalances()
           break
@@ -250,18 +250,23 @@ class WrkMinerPoolRackOcean extends TetherWrkBase {
     }
   }
 
-  async fetchTransactions () {
+  async fetchTransactions (time) {
     try {
       let transactions = []
-      const ts = new Date().setHours(0, 0, 0, 0) - HOURS_24_MS
-      const start = convertMsToSeconds(ts)
-      const end = convertMsToSeconds(ts + HOURS_24_MS)
+      // transactions data is available at the end of UTC day instead of hourly
+      const endMs = Math.floor(time.getTime() / 1000) * 1000
+      const start = convertMsToSeconds(endMs - HOURS_24_MS)
+      const end = convertMsToSeconds(endMs)
       for (const username of this.accounts) {
         const earnings = await this.fetchEarnings(username, start, end)
         transactions = transactions.concat(earnings.map(t => ({ username, ...t })))
       }
 
-      await this._saveToDb(this.transactionsDb, ts, { ts, transactions })
+      // save transaction ts to be able to aggregate for different timezones
+      for (const transaction of transactions) {
+        const ts = new Date(transaction.ts).getTime()
+        await this._saveToDb(this.transactionsDb, ts, { ts, transactions: [transaction] })
+      }
     } catch (e) {
       this._logErr('ERR_FETCH_TRANSACTIONS', e)
     }
