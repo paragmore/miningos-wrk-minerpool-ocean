@@ -866,17 +866,19 @@ test('fetchTransactions and fetchBlocks', async (t) => {
   worker.transactionsDb = {}
   worker.blocksDb = {}
   worker.fetchTransactions = WrkMinerPoolRackOcean.prototype.fetchTransactions
+  worker.fetchEarnings = WrkMinerPoolRackOcean.prototype.fetchEarnings
   worker.fetchBlocks = WrkMinerPoolRackOcean.prototype.fetchBlocks
+  const time = new Date('2024-06-16T00:00:00.000Z')
 
   worker.oceanApi = {
     getTransactions: async () => ({}),
     getBlocks: async () => ({})
   }
-  await worker.fetchTransactions()
+  await worker.fetchTransactions(time)
   await worker.fetchBlocks()
 
   worker.oceanApi = {
-    getTransactions: async () => ({ earnings: [{ satoshis_net_earned: 10 }] }),
+    getTransactions: async () => ({ earnings: [{ ts: '2024-06-15T12:00:00.000Z', satoshis_net_earned: 10 }] }),
     getBlocks: async () => ({
       blocks: [{
         ts: new Date().toISOString(),
@@ -888,7 +890,7 @@ test('fetchTransactions and fetchBlocks', async (t) => {
       }]
     })
   }
-  await worker.fetchTransactions()
+  await worker.fetchTransactions(time)
   await worker.fetchBlocks()
   t.pass()
 })
@@ -1063,25 +1065,39 @@ test('getYearlyBalances: fills balances; handles api errors', async (t) => {
   t.ok(Array.isArray(bad))
 })
 
-test('fetchTransactions fetches the previous full day', async (t) => {
+test('fetchTransactions fetches last 24h and saves each transaction by its ts', async (t) => {
   const worker = createMockWorker()
-  let saved
-  worker._saveToDb = async (db, ts, data) => { saved = { ts, data } }
+  const saved = []
+  worker._saveToDb = async (db, ts, data) => { saved.push({ ts, data }) }
   worker.transactionsDb = {}
   worker.fetchTransactions = WrkMinerPoolRackOcean.prototype.fetchTransactions
-  let window
+  worker.fetchEarnings = WrkMinerPoolRackOcean.prototype.fetchEarnings
+  const windows = []
   worker.oceanApi = {
     getTransactions: async (username, start, end) => {
-      window = { start, end }
-      return {}
+      windows.push({ username, start, end })
+      return {
+        earnings: [
+          { ts: '2024-06-15T01:00:00.000Z', satoshis_net_earned: 10 },
+          { ts: '2024-06-15T02:00:00.000Z', satoshis_net_earned: 20 }
+        ]
+      }
     }
   }
 
-  await worker.fetchTransactions()
+  const time = new Date('2024-06-16T00:00:00.000Z')
+  await worker.fetchTransactions(time)
 
-  const midnight = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000)
-  t.is(window.end, midnight)
-  t.is(window.start, midnight - 24 * 60 * 60)
-  t.is(saved.ts, window.start * 1000)
-  t.alike(saved.data.transactions, [])
+  const endMs = Math.floor(time.getTime() / 1000) * 1000
+  t.is(windows.length, 2)
+  t.is(windows[0].username, 'user1')
+  t.is(windows[1].username, 'user2')
+  t.is(windows[0].end, endMs / 1000)
+  t.is(windows[0].start, (endMs - 24 * 60 * 60 * 1000) / 1000)
+  t.is(saved.length, 4)
+  t.is(saved[0].ts, Date.parse('2024-06-15T01:00:00.000Z'))
+  t.is(saved[0].data.transactions.length, 1)
+  t.is(saved[0].data.transactions[0].username, 'user1')
+  t.is(saved[0].data.transactions[0].satoshis_net_earned, 10)
+  t.is(saved[1].ts, Date.parse('2024-06-15T02:00:00.000Z'))
 })
