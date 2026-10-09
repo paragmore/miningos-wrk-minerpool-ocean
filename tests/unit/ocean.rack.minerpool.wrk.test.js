@@ -838,6 +838,51 @@ test('fetchStats: continues with empty hashrate after last retry', async (t) => 
   t.is(worker.data.statsData.stats[0].active_workers_count, undefined)
 })
 
+test('fetchStats: worker_count only counts the account\'s own workers', async (t) => {
+  const worker = createMockWorker()
+  worker.oceanApi = {
+    getHashRateInfo: async () => ({
+      hashrate_60s: '10',
+      hashrate_3600s: '20',
+      hashrate_86400s: '30',
+      active_worker_count: 1
+    })
+  }
+  worker.getEarnings = async () => ({ revenue: 1, income: 0.5, unsettled: 0.5 })
+  worker.data.workersData = {
+    workers: [
+      { id: 'w1', username: 'user1' },
+      { id: 'w2', username: 'user1' },
+      { id: 'w3', username: 'user2' }
+    ]
+  }
+  worker.fetchStats = WrkMinerPoolRackOcean.prototype.fetchStats
+
+  await worker.fetchStats(new Date('2024-06-15T12:00:00.000Z'))
+  t.is(worker.data.statsData.stats[0].worker_count, 2)
+  t.is(worker.data.statsData.stats[1].worker_count, 1)
+})
+
+test('getEarnings: awaits the API and returns BTC amounts', async (t) => {
+  const worker = createMockWorker()
+  worker.oceanApi = {
+    getEarnings: async (username, since) => {
+      t.is(username, 'user1')
+      t.ok(since > 0)
+      return {
+        earnings: [{ satoshis_net_earned: 200000000 }],
+        payouts: [{ total_satoshis_net_paid: 100000000 }]
+      }
+    }
+  }
+  worker.getEarnings = WrkMinerPoolRackOcean.prototype.getEarnings
+
+  const res = await worker.getEarnings('user1')
+  t.is(res.revenue, 2)
+  t.is(res.income, 1)
+  t.is(res.unsettled, 1)
+})
+
 test('fetchWorkers: merges workers; logs per-account failures', async (t) => {
   const worker = createMockWorker()
   worker.accounts = ['bad', 'good']
@@ -1032,7 +1077,7 @@ test('saveStats and saveWorkers write to db', async (t) => {
   t.ok(saved[1].payload.workers)
 })
 
-test('getEarnings: uses oceanApi payload (sync return)', async (t) => {
+test('getEarnings: tolerates a sync-returning api', async (t) => {
   const worker = createMockWorker()
   worker.oceanApi = {
     getEarnings: () => ({
@@ -1043,7 +1088,8 @@ test('getEarnings: uses oceanApi payload (sync return)', async (t) => {
   worker.getEarnings = WrkMinerPoolRackOcean.prototype.getEarnings
   const r = await worker.getEarnings('user1')
   t.is(r.revenue, 1)
-  t.is(r.income, 25000000)
+  t.is(r.income, 0.25)
+  t.is(r.unsettled, 0.75)
 })
 
 test('getYearlyBalances: fills balances; handles api errors', async (t) => {
