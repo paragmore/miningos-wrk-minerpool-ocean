@@ -3,6 +3,7 @@
 const test = require('brittle')
 const WrkMinerPoolRackOcean = require('../../workers/ocean.rack.minerpool.wrk')
 const { POOL_TYPE, SCHEDULER_TIMES } = require('../../workers/lib/constants')
+const utilsStore = require('@tetherto/hp-svc-facs-store/utils')
 
 function mockDbStream (rows) {
   return {
@@ -14,6 +15,31 @@ function mockDbStream (rows) {
       })()
     }
   }
+}
+
+function mockBee () {
+  const rows = new Map()
+  return {
+    rows,
+    async get (key) {
+      const value = rows.get(key.toString('hex'))
+      return value === undefined ? null : { value }
+    },
+    async put (key, value) {
+      rows.set(key.toString('hex'), value)
+    },
+    createReadStream () {
+      const values = [...rows.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([, value]) => ({ value }))
+      return (async function * () { yield * values })()
+    }
+  }
+}
+
+function beeRow (bee, ts) {
+  const value = bee.rows.get(utilsStore.convIntToBin(ts).toString('hex'))
+  return value === undefined ? null : JSON.parse(value.toString())
 }
 
 function createMockWorker () {
@@ -39,7 +65,7 @@ function createMockWorker () {
   worker.conf = mockConf
   worker.accounts = mockConf.ocean.accounts
   worker.apiRetries = mockConf.ocean.apiRetry || 3
-  worker.lastSavedHashrateTs = 0
+  worker.lastSavedHashrateTs = {}
   worker.wtype = 'ocean'
   worker.prefix = 'ocean-rack-1'
   worker.data = {
@@ -908,7 +934,7 @@ test('fetchWorkers: merges workers; logs per-account failures', async (t) => {
 test('fetchTransactions and fetchBlocks', async (t) => {
   const worker = createMockWorker()
   worker._saveToDb = async () => {}
-  worker.transactionsDb = {}
+  worker.transactionsDb = mockBee()
   worker.blocksDb = {}
   worker.fetchTransactions = WrkMinerPoolRackOcean.prototype.fetchTransactions
   worker.fetchEarnings = WrkMinerPoolRackOcean.prototype.fetchEarnings
@@ -937,15 +963,45 @@ test('fetchTransactions and fetchBlocks', async (t) => {
   }
   await worker.fetchTransactions(time)
   await worker.fetchBlocks()
-  t.pass()
+
+  const row = beeRow(worker.transactionsDb, Date.parse('2024-06-15T12:00:00.000Z'))
+  // user1 and user2 both earned at the same timestamp; the row keeps both.
+  t.is(row.transactions.length, 2)
+  t.alike(row.transactions.map(x => x.username).sort(), ['user1', 'user2'])
+})
+
+test('fetchTransactions: same-ts earnings from both accounts persist, refetch stays idempotent', async (t) => {
+  const worker = createMockWorker()
+  worker.transactionsDb = mockBee()
+  worker.fetchTransactions = WrkMinerPoolRackOcean.prototype.fetchTransactions
+  worker.fetchEarnings = WrkMinerPoolRackOcean.prototype.fetchEarnings
+  const time = new Date('2024-06-16T00:00:00.000Z')
+
+  worker.oceanApi = {
+    getTransactions: async (username) => ({
+      earnings: [
+        { ts: '2024-06-15T12:00:00.000Z', satoshis_net_earned: username === 'user1' ? 100 : 40, block_hash: 'b1' },
+        { ts: '2024-06-15T18:00:00.000Z', satoshis_net_earned: username === 'user1' ? 60 : 25, block_hash: 'b2' }
+      ]
+    })
+  }
+
+  await worker.fetchTransactions(time)
+  await worker.fetchTransactions(time)
+
+  const noon = beeRow(worker.transactionsDb, Date.parse('2024-06-15T12:00:00.000Z'))
+  t.is(noon.transactions.length, 2)
+  t.is(noon.transactions.find(x => x.username === 'user1').satoshis_net_earned, 100)
+  t.is(noon.transactions.find(x => x.username === 'user2').satoshis_net_earned, 40)
+
+  const evening = beeRow(worker.transactionsDb, Date.parse('2024-06-15T18:00:00.000Z'))
+  t.is(evening.transactions.length, 2)
 })
 
 test('fetchHashrateHistory: saves new history points', async (t) => {
   const worker = createMockWorker()
   worker.accounts = ['user1']
-  worker.hashrateHistoryDb = {}
-  const saved = []
-  worker._saveToDb = async (db, ts, data) => { saved.push({ ts, data }) }
+  worker.hashrateHistoryDb = mockBee()
   worker.fetchHashrateHistory = WrkMinerPoolRackOcean.prototype.fetchHashrateHistory
   worker.oceanApi = {
     getHashRateHistory: async () => ({
@@ -960,27 +1016,75 @@ test('fetchHashrateHistory: saves new history points', async (t) => {
   }
 
   await worker.fetchHashrateHistory()
-  t.is(saved.length, 2)
-  t.is(saved[0].data.username, 'user1')
-  t.is(saved[0].data.hashrate, 100)
-  t.is(saved[1].data.hashrate, 300)
-  t.is(saved[0].ts, Date.parse('2026-09-14T00:00:00Z'))
-  t.is(saved[1].ts, Date.parse('2026-09-14T01:00:00Z'))
-  t.ok(worker.lastSavedHashrateTs > 0)
+  // Only the exact-hour samples are kept.
+  t.is(worker.hashrateHistoryDb.rows.size, 2)
+  const midnight = beeRow(worker.hashrateHistoryDb, Date.parse('2026-09-14T00:00:00Z'))
+  t.alike(midnight.entries, [{ username: 'user1', hashrate: 100 }])
+  const one = beeRow(worker.hashrateHistoryDb, Date.parse('2026-09-14T01:00:00Z'))
+  t.alike(one.entries, [{ username: 'user1', hashrate: 300 }])
+  t.is(worker.lastSavedHashrateTs.user1, Date.parse('2026-09-14T01:00:00Z'))
+})
+
+test('fetchHashrateHistory: stores every account for the same hour', async (t) => {
+  const worker = createMockWorker()
+  worker.hashrateHistoryDb = mockBee()
+  worker.fetchHashrateHistory = WrkMinerPoolRackOcean.prototype.fetchHashrateHistory
+  worker.oceanApi = {
+    getHashRateHistory: async (username) => ({
+      hashrate_history: {
+        '2026-09-14T00:00:00': username === 'user1' ? 100 : 40,
+        '2026-09-14T01:00:00': username === 'user1' ? 300 : 70
+      }
+    })
+  }
+
+  await worker.fetchHashrateHistory()
+
+  const midnight = beeRow(worker.hashrateHistoryDb, Date.parse('2026-09-14T00:00:00Z'))
+  t.alike(midnight.entries, [
+    { username: 'user1', hashrate: 100 },
+    { username: 'user2', hashrate: 40 }
+  ])
+  t.is(worker.lastSavedHashrateTs.user1, Date.parse('2026-09-14T01:00:00Z'))
+  t.is(worker.lastSavedHashrateTs.user2, Date.parse('2026-09-14T01:00:00Z'))
+})
+
+test('fetchHashrateHistory: merges into rows written before multi-account support', async (t) => {
+  const worker = createMockWorker()
+  worker.accounts = ['user2']
+  worker.hashrateHistoryDb = mockBee()
+  const ts = Date.parse('2026-09-14T00:00:00Z')
+  await worker.hashrateHistoryDb.put(
+    utilsStore.convIntToBin(ts),
+    Buffer.from(JSON.stringify({ ts, username: 'user1', hashrate: 100 }))
+  )
+  worker.fetchHashrateHistory = WrkMinerPoolRackOcean.prototype.fetchHashrateHistory
+  worker.oceanApi = {
+    getHashRateHistory: async () => ({
+      hashrate_history: { '2026-09-14T00:00:00': 40 }
+    })
+  }
+
+  await worker.fetchHashrateHistory()
+
+  const row = beeRow(worker.hashrateHistoryDb, ts)
+  t.alike(row.entries, [
+    { username: 'user1', hashrate: 100 },
+    { username: 'user2', hashrate: 40 }
+  ])
 })
 
 test('fetchHashrateHistory: skips empty history and older timestamps', async (t) => {
   const worker = createMockWorker()
   worker.accounts = ['user1']
-  const saved = []
-  worker._saveToDb = async (db, ts, data) => { saved.push({ ts, data }) }
+  worker.hashrateHistoryDb = mockBee()
   worker.fetchHashrateHistory = WrkMinerPoolRackOcean.prototype.fetchHashrateHistory
 
   worker.oceanApi = { getHashRateHistory: async () => ({}) }
   await worker.fetchHashrateHistory()
-  t.is(saved.length, 0)
+  t.is(worker.hashrateHistoryDb.rows.size, 0)
 
-  worker.lastSavedHashrateTs = Date.parse('2026-09-14T01:00:00Z')
+  worker.lastSavedHashrateTs = { user1: Date.parse('2026-09-14T01:00:00Z') }
   worker.oceanApi = {
     getHashRateHistory: async () => ({
       hashrate_history: {
@@ -991,7 +1095,29 @@ test('fetchHashrateHistory: skips empty history and older timestamps', async (t)
     })
   }
   await worker.fetchHashrateHistory()
-  t.is(saved.length, 0)
+  t.is(worker.hashrateHistoryDb.rows.size, 0)
+})
+
+test('getWrkExtData: hashrate-history flattens multi-account rows and keeps legacy ones', async (t) => {
+  const worker = createMockWorker()
+  worker.getDbData = WrkMinerPoolRackOcean.prototype.getDbData
+  worker.getWrkExtData = WrkMinerPoolRackOcean.prototype.getWrkExtData
+  const t0 = Date.parse('2026-09-14T00:00:00Z')
+  const t1 = Date.parse('2026-09-14T01:00:00Z')
+  worker.hashrateHistoryDb = mockDbStream([
+    { ts: t0, username: 'user1', hashrate: 100 },
+    { ts: t1, entries: [{ username: 'user1', hashrate: 300 }, { username: 'user2', hashrate: 70 }] }
+  ])
+
+  const data = await worker.getWrkExtData({
+    query: { key: 'hashrate-history', start: t0, end: t1 }
+  })
+
+  t.alike(data.hashrateHistory, [
+    { poolType: POOL_TYPE, ts: t0, username: 'user1', hashrate: 100 },
+    { poolType: POOL_TYPE, ts: t1, username: 'user1', hashrate: 300 },
+    { poolType: POOL_TYPE, ts: t1, username: 'user2', hashrate: 70 }
+  ])
 })
 
 test('fetchHashrateHistory: logs error without throwing', async (t) => {
@@ -1113,9 +1239,7 @@ test('getYearlyBalances: fills balances; handles api errors', async (t) => {
 
 test('fetchTransactions fetches last 24h and saves each transaction by its ts', async (t) => {
   const worker = createMockWorker()
-  const saved = []
-  worker._saveToDb = async (db, ts, data) => { saved.push({ ts, data }) }
-  worker.transactionsDb = {}
+  worker.transactionsDb = mockBee()
   worker.fetchTransactions = WrkMinerPoolRackOcean.prototype.fetchTransactions
   worker.fetchEarnings = WrkMinerPoolRackOcean.prototype.fetchEarnings
   const windows = []
@@ -1140,12 +1264,14 @@ test('fetchTransactions fetches last 24h and saves each transaction by its ts', 
   t.is(windows[1].username, 'user2')
   t.is(windows[0].end, endMs / 1000)
   t.is(windows[0].start, (endMs - 24 * 60 * 60 * 1000) / 1000)
-  t.is(saved.length, 4)
-  t.is(saved[0].ts, Date.parse('2024-06-15T01:00:00.000Z'))
-  t.is(saved[0].data.transactions.length, 1)
-  t.is(saved[0].data.transactions[0].username, 'user1')
-  t.is(saved[0].data.transactions[0].satoshis_net_earned, 10)
-  t.is(saved[1].ts, Date.parse('2024-06-15T02:00:00.000Z'))
+  t.is(worker.transactionsDb.rows.size, 2)
+  const one = beeRow(worker.transactionsDb, Date.parse('2024-06-15T01:00:00.000Z'))
+  t.is(one.transactions.length, 2)
+  t.is(one.transactions[0].username, 'user1')
+  t.is(one.transactions[0].satoshis_net_earned, 10)
+  t.is(one.transactions[1].username, 'user2')
+  const two = beeRow(worker.transactionsDb, Date.parse('2024-06-15T02:00:00.000Z'))
+  t.is(two.transactions.length, 2)
 })
 
 test('getEarnings: tolerates an empty api body', async (t) => {
