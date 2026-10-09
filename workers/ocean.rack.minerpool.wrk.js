@@ -142,7 +142,13 @@ class WrkMinerPoolRackOcean extends TetherWrkBase {
     try {
       const stats = []
       for (const username of this.accounts) {
-        const earnings = await this.getEarnings(username)
+        let earnings
+        try {
+          earnings = await this.getEarnings(username)
+        } catch (e) {
+          this._logErr('ERR_FETCH_EARNINGS', e)
+          earnings = { revenue: 0, income: 0, unsettled: 0 }
+        }
         const hashRate = await this.fetchHashrate(username)
 
         stats.push({
@@ -423,7 +429,7 @@ class WrkMinerPoolRackOcean extends TetherWrkBase {
   async getEarnings (username) {
     let revenue = 0; let income = 0
     const time24HoursAgo = convertMsToSeconds(Date.now() - 24 * 60 * 60 * 1000)
-    const data = await this.oceanApi.getEarnings(username, time24HoursAgo)
+    const data = (await this.oceanApi.getEarnings(username, time24HoursAgo)) || {}
 
     data.earnings?.forEach(earning => {
       revenue += earning.satoshis_net_earned

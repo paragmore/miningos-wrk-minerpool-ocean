@@ -1147,3 +1147,31 @@ test('fetchTransactions fetches last 24h and saves each transaction by its ts', 
   t.is(saved[0].data.transactions[0].satoshis_net_earned, 10)
   t.is(saved[1].ts, Date.parse('2024-06-15T02:00:00.000Z'))
 })
+
+test('getEarnings: tolerates an empty api body', async (t) => {
+  const worker = createMockWorker()
+  worker.oceanApi = { getEarnings: async () => null }
+  worker.getEarnings = WrkMinerPoolRackOcean.prototype.getEarnings
+
+  const res = await worker.getEarnings('user1')
+  t.alike(res, { revenue: 0, income: 0, unsettled: 0 })
+})
+
+test('fetchStats: one account failing its earnings fetch does not drop the tick', async (t) => {
+  const worker = createMockWorker()
+  worker._logErr = () => {}
+  worker.oceanApi = {
+    getHashRateInfo: async () => ({ hashrate_60s: '10', active_worker_count: 1 })
+  }
+  worker.getEarnings = async (username) => {
+    if (username === 'user1') throw new Error('boom')
+    return { revenue: 1, income: 0.5, unsettled: 0.5 }
+  }
+  worker.data.workersData = { workers: [] }
+  worker.fetchStats = WrkMinerPoolRackOcean.prototype.fetchStats
+
+  await worker.fetchStats(new Date('2024-06-15T12:00:00.000Z'))
+  t.is(worker.data.statsData.stats.length, 2, 'both accounts still reported')
+  t.is(worker.data.statsData.stats[0].balance, 0, 'failed account degrades to zeros')
+  t.is(worker.data.statsData.stats[1].balance, 1)
+})
