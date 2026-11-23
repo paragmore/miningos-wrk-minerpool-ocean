@@ -246,8 +246,13 @@ class WrkMinerPoolRackOcean extends TetherWrkBase {
 
     try {
       const samples = new Map()
+      const inactive = []
       for (const username of this.accounts) {
         const info = await this.oceanApi.getHashRateInfo(username)
+        if (info?.inactive) {
+          inactive.push(username)
+          continue
+        }
         const snapSec = toFiniteNumber(info?.snap_ts)
         const snapTs = snapSec === null ? null : snapSec * 1000
         const hashrate = toFiniteNumber(info?.hashrate_60s)
@@ -256,6 +261,10 @@ class WrkMinerPoolRackOcean extends TetherWrkBase {
 
         if (!samples.has(snapTs)) samples.set(snapTs, [])
         samples.get(snapTs).push({ username, hashrate })
+      }
+
+      for (const entries of samples.values()) {
+        for (const username of inactive) entries.push({ username, hashrate: 0 })
       }
 
       for (const [ts, entries] of samples) {

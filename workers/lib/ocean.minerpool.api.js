@@ -2,16 +2,21 @@
 
 const { setTimeout: sleep } = require('timers/promises')
 
+const NO_ACTIVE_WORKERS_ERROR = /no such user|no active workers/i
+
 class OceanMinerPoolApi {
   constructor (http, { delayMs = 5000 } = {}) {
     this._http = http
     this._delayMs = delayMs
   }
 
-  async _request (apiPath) {
+  async _request (apiPath, { flagInactive = false } = {}) {
     if (this._delayMs > 0) await sleep(this._delayMs)
     try {
       const { body: resp } = await this._http.get(apiPath, { encoding: 'json' })
+      if (flagInactive && resp.result === undefined && NO_ACTIVE_WORKERS_ERROR.test(resp.error)) {
+        return { inactive: true }
+      }
       return resp.result
     } catch (e) {
       console.error('ERR_REQUEST_API', e)
@@ -20,7 +25,7 @@ class OceanMinerPoolApi {
   }
 
   async getHashRateInfo (username) {
-    return this._request(`/v1/user_hashrate/${username}`)
+    return this._request(`/v1/user_hashrate/${username}`, { flagInactive: true })
   }
 
   async getHashRateHistory (username, start, end) {
