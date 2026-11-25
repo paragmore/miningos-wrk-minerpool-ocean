@@ -2,7 +2,7 @@
 
 const { setTimeout: sleep } = require('timers/promises')
 
-const NO_ACTIVE_WORKERS_ERROR = /no such user|no active workers/i
+const NO_ACTIVE_WORKERS_ERROR = /^no such user or user has no active workers$/i
 
 class OceanMinerPoolApi {
   constructor (http, { delayMs = 5000 } = {}) {
@@ -24,6 +24,7 @@ class OceanMinerPoolApi {
     return {}
   }
 
+  // Answers `{ inactive: true }` when Ocean has no active workers for the account.
   async getHashRateInfo (username) {
     return this._request(`/v1/user_hashrate/${username}`, { flagInactive: true })
   }

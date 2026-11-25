@@ -149,6 +149,25 @@ test('fetchRealtimeHashrate records zero for an account Ocean reports as inactiv
   t.alike(served.stats.map(s => s.hashrate), [600000000000000000, 0])
 })
 
+test('fetchRealtimeHashrate warns once per inactive spell', async (t) => {
+  const worker = createWorker()
+  worker.oceanApi = oceanApi({
+    user1: [1, 2, 3, 4].map(i => ({ snap_ts: String(SNAP_1 + i * 60), hashrate_60s: '5' })),
+    user2: [{ inactive: true }, { inactive: true }, { snap_ts: String(SNAP_1 + 180), hashrate_60s: '7' }, { inactive: true }]
+  })
+  const warned = []
+  const warn = console.warn
+  console.warn = (...args) => warned.push(args.slice(1))
+  t.teardown(() => { console.warn = warn })
+
+  for (let i = 0; i < 4; i++) await worker.fetchRealtimeHashrate()
+
+  t.alike(warned, [
+    ['WARN_OCEAN_ACCOUNT_INACTIVE', 'user2'],
+    ['WARN_OCEAN_ACCOUNT_INACTIVE', 'user2']
+  ])
+})
+
 test('fetchRealtimeHashrate stores nothing when only inactive accounts answer', async (t) => {
   const worker = createWorker()
   worker.oceanApi = oceanApi({

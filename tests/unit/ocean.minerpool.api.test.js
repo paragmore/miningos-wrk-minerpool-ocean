@@ -46,11 +46,10 @@ test('OceanMinerPoolApi: getHashRateInfo flags an account with no active workers
 })
 
 test('OceanMinerPoolApi: getHashRateInfo does not flag other errors as inactive', async (t) => {
-  const api = createApi({
-    get: async () => ({ body: { error: 'Internal error' } })
-  })
-
-  t.is(await api.getHashRateInfo('user'), undefined)
+  for (const error of ['Internal error', 'No such user', 'user has no active workers', undefined]) {
+    const api = createApi({ get: async () => ({ body: { error } }) })
+    t.is(await api.getHashRateInfo('user'), undefined)
+  }
 })
 
 test('OceanMinerPoolApi: getHashRateHistory should call correct endpoint', async (t) => {
